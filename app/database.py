@@ -293,6 +293,94 @@ CREATE TABLE IF NOT EXISTS compute_interventions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_compute_interventions_task ON compute_interventions(task_id,id);
+
+CREATE TABLE IF NOT EXISTS settlement_cases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_code TEXT NOT NULL UNIQUE,
+    ceremony_type TEXT NOT NULL DEFAULT '',
+    family_contact TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','revoked')),
+    current_version INTEGER,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settlement_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES settlement_cases(id) ON DELETE RESTRICT,
+    version INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','confirmed','published','revoked')),
+    payables_cents INTEGER NOT NULL DEFAULT 0,
+    receipts_cents INTEGER NOT NULL DEFAULT 0,
+    net_cents INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'CNY',
+    basis TEXT NOT NULL DEFAULT '',
+    input_digest TEXT NOT NULL DEFAULT '',
+    snapshot_digest TEXT NOT NULL DEFAULT '',
+    supersedes_version INTEGER,
+    diff_json TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    confirmed_by TEXT,
+    confirmed_at TEXT,
+    published_by TEXT,
+    published_at TEXT,
+    revoked_by TEXT,
+    revoked_at TEXT,
+    revoke_reason TEXT,
+    UNIQUE(case_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_versions_case ON settlement_versions(case_id,version);
+CREATE TABLE IF NOT EXISTS settlement_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL REFERENCES settlement_versions(id) ON DELETE RESTRICT,
+    case_id INTEGER NOT NULL REFERENCES settlement_cases(id) ON DELETE RESTRICT,
+    sequence_no INTEGER NOT NULL,
+    entry_type TEXT NOT NULL CHECK(entry_type IN ('payable','receipt')),
+    line_key TEXT NOT NULL,
+    category TEXT NOT NULL,
+    counterparty TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    amount_cents INTEGER NOT NULL CHECK(amount_cents >= 0),
+    quantity_cents INTEGER,
+    unit_price_cents INTEGER,
+    source_ref TEXT NOT NULL DEFAULT '',
+    voucher_no TEXT NOT NULL DEFAULT '',
+    voucher_required INTEGER NOT NULL DEFAULT 1 CHECK(voucher_required IN (0,1)),
+    flags_json TEXT NOT NULL DEFAULT '[]',
+    import_batch TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    updated_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(version_id, entry_type, line_key)
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_entries_version ON settlement_entries(version_id);
+CREATE INDEX IF NOT EXISTS idx_settlement_entries_ref ON settlement_entries(case_id,entry_type,source_ref);
+CREATE TABLE IF NOT EXISTS settlement_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER NOT NULL REFERENCES settlement_cases(id) ON DELETE RESTRICT,
+    version_id INTEGER NOT NULL REFERENCES settlement_versions(id) ON DELETE RESTRICT,
+    import_batch TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(case_id, import_batch)
+);
+CREATE TABLE IF NOT EXISTS settlement_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id INTEGER,
+    version_id INTEGER,
+    version_no INTEGER,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    before_json TEXT NOT NULL DEFAULT '{}',
+    after_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_settlement_audit_case ON settlement_audit(case_id,id);
 '''
 
 PERMISSIONS = [
@@ -311,6 +399,9 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("settlements.read", "查看结算", "settlements", "read"),
+    ("settlements.write", "编制结算", "settlements", "write"),
+    ("settlements.publish", "发布撤销结算", "settlements", "publish"),
 ]
 
 
@@ -380,11 +471,25 @@ def init_db() -> None:
             "INSERT OR IGNORE INTO roles(code,name,description,is_system,created_at,updated_at) VALUES('auditor','审计查看员','只读查看业务与审计记录',1,?,?)",
             (now, now),
         )
+        connection.execute(
+            "INSERT OR IGNORE INTO roles(code,name,description,is_system,created_at,updated_at) VALUES('finance_reviewer','财务复核员','可编制结算并发布或撤销已确认结算版本',1,?,?)",
+            (now, now),
+        )
         administrator = connection.execute("SELECT id FROM roles WHERE code='administrator'").fetchone()[0]
         connection.execute(
             "INSERT OR IGNORE INTO role_permissions(role_id,permission_id,granted_at) SELECT ?,id,? FROM permissions",
             (administrator, now),
         )
+        for role_code, permission_codes in (
+            ("clerk", ("settlements.read", "settlements.write")),
+            ("finance_reviewer", ("settlements.read", "settlements.write", "settlements.publish")),
+        ):
+            role_row = connection.execute("SELECT id FROM roles WHERE code=?", (role_code,)).fetchone()
+            placeholders = ",".join("?" for _ in permission_codes)
+            connection.execute(
+                f"INSERT OR IGNORE INTO role_permissions(role_id,permission_id,granted_at) SELECT ?,id,? FROM permissions WHERE code IN ({placeholders})",
+                (role_row[0], now, *permission_codes),
+            )
 
 
 def migrate_db() -> None:
