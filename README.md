@@ -32,7 +32,16 @@ uvicorn app.main:app --host 0.0.0.0 --port 8432
 curl -sS http://127.0.0.1:8432/api/system/health
 ```
 
-服务订单运营接口使用 `/api/compute` 前缀，身份、角色、审计和系统接口分别位于 `/api/auth`、`/api/roles`、`/api/audit` 与 `/api/system`。
+服务订单运营接口使用 `/api/compute` 前缀，身份、角色、审计和系统接口分别位于 `/api/auth`、`/api/roles`、`/api/audit` 与 `/api/system`。结算版本化接口位于 `/api/settlements`，需要登录会话并按 `settlements.read` / `settlements.write` / `settlements.review` 权限放行。
+
+## 结算版本化流程
+
+仪式结束后补录的礼金、场地加时和供应商实际用量按批次导入结算单，金额一律以“分”存储与返回（请求中以元为单位、最多两位小数）。每个结算单的状态机为：草稿（可反复导入、重算、作废条目）→ 已确认（生成不可变的应付/收款快照与完整性摘要值）→ 已发布（仅 `settlements.review` 权限的复核人可操作）→ 被替代或已撤销。已确认版本不能再导入或重算，修改必须开启新版本，旧版本快照与差异（含两任确认人、发布人）永久保留；撤销同样需要复核权限并记录原因。
+
+- 导入幂等：同一 `batch_key` 重复提交返回首次结果（`replayed=true`），键相同但内容不同返回 409；同一外部单号同金额自动去重，金额不一致标记冲突并保留新旧金额。
+- 发布门禁：场地加时与供应商用量缺凭证号、或存在未处理的金额冲突时，发布返回 409 并在 `error.context.issues` 中列出具体条目；冲突需在草稿中通过 `keep_existing` / `accept_incoming` 显式处理。
+- 重启安全：所有晋级都在单个即时事务内落盘，服务重启不会把草稿或已确认版本误置为已发布。
+- 回放与审计：`GET /api/settlements/{id}/versions/{version}` 返回该版本的快照、条目与导入批次，`GET /api/settlements/{id}/audit` 返回完整审计链。
 
 ## 测试与编译检查
 
@@ -52,6 +61,7 @@ python -m app.cli compute-demo
 
 ```text
 app/compute/       任务模板、配额、提交、领取、回执和人工干预
+app/settlement/     结算单、费用批次导入、版本晋级、快照与发布门禁
 app/api/            登录、角色、审计和系统管理接口
 app/core/           时钟、安全、异常和分页能力
 app/repositories/   SQLite 查询与事务封装

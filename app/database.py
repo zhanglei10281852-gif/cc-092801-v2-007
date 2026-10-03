@@ -311,6 +311,9 @@ PERMISSIONS = [
     ("announcements.write", "维护公告", "announcements", "write"),
     ("audit.read", "查看审计", "audit", "read"),
     ("jobs.run", "执行后台任务", "jobs", "run"),
+    ("settlements.read", "查看结算", "settlements", "read"),
+    ("settlements.write", "维护结算", "settlements", "write"),
+    ("settlements.review", "复核发布结算", "settlements", "review"),
 ]
 
 
